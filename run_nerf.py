@@ -707,6 +707,7 @@ def train():
         lrate = tf.keras.optimizers.schedules.ExponentialDecay(lrate,
                                                                decay_steps=args.lrate_decay * 1000, decay_rate=0.1)
     optimizer = tf.keras.optimizers.Adam(lrate)
+    optimizer = tf.train.experimental.enable_mixed_precision_graph_rewrite(optimizer)
     models['optimizer'] = optimizer
 
     global_step = tf.compat.v1.train.get_or_create_global_step()
