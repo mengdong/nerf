@@ -1,5 +1,8 @@
 import os
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+os.environ['TF_ENABLE_AUTO_MIXED_PRECISION'] = '1'
+
+from tensorflow.python.framework.ops import disable_eager_execution
 
 import sys
 import tensorflow as tf
@@ -12,9 +15,10 @@ from run_nerf_helpers import *
 from load_llff import load_llff_data
 from load_deepvoxels import load_dv_data
 from load_blender import load_blender_data
+from tensorflow.keras import mixed_precision
 
-
-tf.compat.v1.enable_eager_execution()
+policy = mixed_precision.Policy('mixed_float16')
+mixed_precision.set_global_policy(policy)
 
 
 def batchify(fn, chunk):
@@ -576,7 +580,7 @@ def train():
 
     parser = config_parser()
     args = parser.parse_args()
-    
+
     if args.random_seed is not None:
         print('Fixing random seed', args.random_seed)
         np.random.seed(args.random_seed)
@@ -707,7 +711,7 @@ def train():
         lrate = tf.keras.optimizers.schedules.ExponentialDecay(lrate,
                                                                decay_steps=args.lrate_decay * 1000, decay_rate=0.1)
     optimizer = tf.keras.optimizers.Adam(lrate)
-    optimizer = tf.train.experimental.enable_mixed_precision_graph_rewrite(optimizer)
+    optimizer = mixed_precision.LossScaleOptimizer(optimizer)
     models['optimizer'] = optimizer
 
     global_step = tf.compat.v1.train.get_or_create_global_step()
@@ -751,9 +755,8 @@ def train():
     print('VAL views are', i_val)
 
     # Summary writers
-    writer = tf.contrib.summary.create_file_writer(
+    writer = tf.summary.create_file_writer(
         os.path.join(basedir, 'summaries', expname))
-    writer.set_as_default()
 
     for i in range(start, N_iters):
         time0 = time.time()
@@ -824,7 +827,8 @@ def train():
                 loss += img_loss0
                 psnr0 = mse2psnr(img_loss0)
 
-        gradients = tape.gradient(loss, grad_vars)
+        scaled_gradients = tape.gradient(loss, grad_vars)
+        gradients = optimizer.get_unscaled_gradients(scaled_gradients)
         optimizer.apply_gradients(zip(gradients, grad_vars))
 
         dt = time.time()-time0
@@ -876,12 +880,14 @@ def train():
 
             print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
             print('iter time {:.05f}'.format(dt))
-            with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_print):
-                tf.contrib.summary.scalar('loss', loss)
-                tf.contrib.summary.scalar('psnr', psnr)
-                tf.contrib.summary.histogram('tran', trans)
+            tf.summary.experimental.set_step(global_step)
+            with writer.as_default():
+                tf.summary.scalar('loss', loss)
+                tf.summary.scalar('psnr', psnr)
+                tf.summary.histogram('tran', trans)
                 if args.N_importance > 0:
-                    tf.contrib.summary.scalar('psnr0', psnr0)
+                    tf.summary.scalar('psnr0', psnr0)
+                writer.flush()
 
             if i % args.i_img == 0:
 
@@ -901,26 +907,27 @@ def train():
                     os.makedirs(testimgdir, exist_ok=True)
                 imageio.imwrite(os.path.join(testimgdir, '{:06d}.png'.format(i)), to8b(rgb))
 
-                with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
-
-                    tf.contrib.summary.image('rgb', to8b(rgb)[tf.newaxis])
-                    tf.contrib.summary.image(
+                with writer.as_default():
+                    tf.summary.image('rgb', to8b(rgb)[tf.newaxis])
+                    tf.summary.image(
                         'disp', disp[tf.newaxis, ..., tf.newaxis])
-                    tf.contrib.summary.image(
+                    tf.summary.image(
                         'acc', acc[tf.newaxis, ..., tf.newaxis])
 
-                    tf.contrib.summary.scalar('psnr_holdout', psnr)
-                    tf.contrib.summary.image('rgb_holdout', target[tf.newaxis])
+                    tf.summary.scalar('psnr_holdout', psnr)
+                    tf.summary.image('rgb_holdout', target[tf.newaxis])
+                    writer.flush()
 
                 if args.N_importance > 0:
 
-                    with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
-                        tf.contrib.summary.image(
+                    with writer.as_default(): 
+                        tf.summary.image(
                             'rgb0', to8b(extras['rgb0'])[tf.newaxis])
-                        tf.contrib.summary.image(
+                        tf.summary.image(
                             'disp0', extras['disp0'][tf.newaxis, ..., tf.newaxis])
-                        tf.contrib.summary.image(
+                        tf.summary.image(
                             'z_std', extras['z_std'][tf.newaxis, ..., tf.newaxis])
+                        writer.flush()
 
         global_step.assign_add(1)
 
